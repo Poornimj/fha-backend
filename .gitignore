@@ -1,0 +1,6 @@
+
+# Local backup/helper files
+backup-*/
+*.ps1
+node_modules/
+.env
