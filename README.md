@@ -1,6 +1,7 @@
 # Happy Drops Backend
 
-Small Express/PostgreSQL backend for login and signup.
+Express/PostgreSQL backend for Happy Drops accounts, commerce, workshops,
+suppliers, wellness assessments, and the Knowledge Hub.
 
 ## Setup
 
@@ -19,4 +20,10 @@ Small Express/PostgreSQL backend for login and signup.
    npm run dev
    ```
 
-The server creates the first `users` table automatically on startup.
+The server automatically applies pending SQL files from `migrations/` on startup.
+Each migration runs in a transaction and is recorded in `schema_migrations`.
+Never edit an already-applied migration; add a new numbered migration instead.
+
+The migration runner recognizes the existing Happy Drops schema as its baseline,
+so it does not recreate those tables or touch their data. Always back up a
+production database before applying migrations.
