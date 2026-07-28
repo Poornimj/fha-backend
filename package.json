@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "check": "node --check src/server.js && node --check src/routes/auth.js && node --check src/routes/catalog.js && node --check src/routes/cart.js && node --check src/routes/workflows.js && node --check src/routes/orders.js && node --check src/routes/account.js && node --check src/routes/admin.js",
+    "db:migrate": "node src/scripts/migrate.js"
+    ,"test:smoke": "node src/scripts/smoke.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
