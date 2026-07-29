@@ -27,6 +27,29 @@ try {
   await request("/api/auth/me", { headers: auth });
   const { products } = await request("/api/products?search=Dew");
   const product = products.find((item) => item.name === "Dew");
+  await request("/api/account/wellness-profile", {
+    method: "PUT", headers: auth,
+    body: JSON.stringify({
+      currentSymptoms: "Smoke test symptom",
+      symptomsDuration: "One week",
+      symptomsFrequency: "Occasionally",
+      takesMedication: false,
+      wellnessGoals: "Verify profile persistence",
+      consentGiven: true,
+    }),
+  });
+  const wellnessProfile = await request("/api/account/wellness-profile", { headers: auth });
+  if (!wellnessProfile.wellnessProfile) throw new Error("Wellness profile persistence failed.");
+  const favoriteResult = await request("/api/account/favorites", {
+    method: "POST", headers: auth, body: JSON.stringify({ productId: product.id }),
+  });
+  const favorites = await request("/api/account/favorites", { headers: auth });
+  if (!favorites.favorites.some((favorite) => favorite.product_id === product.id)) {
+    throw new Error("Wishlist persistence failed.");
+  }
+  if (favoriteResult.favorite) {
+    await request(`/api/account/favorites/${favoriteResult.favorite.id}`, { method: "DELETE", headers: auth });
+  }
   const cart = await request("/api/cart/items", {
     method: "POST", headers: auth, body: JSON.stringify({ productId: product.id, quantity: 1 }),
   });
