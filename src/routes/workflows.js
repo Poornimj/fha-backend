@@ -2,8 +2,42 @@ import express from "express";
 import { pool } from "../db.js";
 import { requireAuth, optionalAuth } from "../middleware/auth.js";
 import { asyncRoute, email, integer, text, uuid } from "../lib/http.js";
+import { config } from "../config.js";
 
 const router=express.Router();
+
+const publicQuestionWindows=new Map();
+function generalWellnessAnswer(question){
+ const normalized=question.toLowerCase();
+ if(/headache|migraine/.test(normalized))return "For a mild headache, some people find the aroma of lavender relaxing, while properly diluted peppermint oil applied to the temples or back of the neck may feel cooling. Never apply essential oils undiluted, keep them away from the eyes, and do not swallow them. Rest, drink water, eat regularly, and reduce bright light if it bothers you. Seek medical advice for frequent or worsening headaches, and urgent care for a sudden severe headache or one accompanied by weakness, confusion, fever, fainting, vision changes, or a head injury. This is general wellness information, not medical advice.";
+ if(/sleep|insomnia|cannot sleep|can't sleep/.test(normalized))return "A consistent bedtime, a cool dark room, reduced evening screen time, and avoiding late caffeine may support better sleep. Some people find gently diffused lavender relaxing; follow the diffuser instructions and stop if it causes irritation or breathing discomfort. Persistent sleep problems should be discussed with a healthcare professional. This is general wellness information, not medical advice.";
+ if(/stress|anxiety|relax/.test(normalized))return "Try slow breathing, a short walk, regular meals, adequate sleep, and a few quiet minutes away from screens. A gently diffused lavender or citrus aroma may feel calming for some people, but stop if it causes irritation or discomfort. If anxiety is persistent, severe, or affects daily life, contact a qualified healthcare professional. This is general wellness information, not medical advice.";
+ return "For personalized and safe guidance, consider your symptoms, how long they have lasted, any medicines you use, allergies, pregnancy, and existing health conditions. Essential oils should be properly diluted, kept away from the eyes, and never swallowed unless specifically directed by a qualified healthcare professional. Persistent, worsening, or concerning symptoms should be assessed by a healthcare professional. This is general wellness information, not medical advice.";
+}
+router.post("/knowledge/ai-answer",asyncRoute(async(req,res)=>{
+ const question=text(req.body.question,"Question",{required:true,max:1200});
+ if(question.length<10)return res.status(400).json({message:"Please enter a question with at least 10 characters."});
+ const now=Date.now();
+ const key=req.ip||"anonymous";
+ const recent=(publicQuestionWindows.get(key)||[]).filter((time)=>now-time<10*60*1000);
+ if(recent.length>=10)return res.status(429).json({message:"Please wait before asking another question."});
+ recent.push(now); publicQuestionWindows.set(key,recent);
+ if(!config.openai.apiKey)return res.json({answer:generalWellnessAnswer(question)});
+ const response=await fetch("https://api.openai.com/v1/responses",{
+  method:"POST",
+  headers:{Authorization:`Bearer ${config.openai.apiKey}`,"Content-Type":"application/json"},
+  body:JSON.stringify({
+   model:config.openai.model,store:false,max_output_tokens:500,
+   instructions:"You are the Happy Drops wellness education assistant. Give clear, friendly, concise general wellness information. Never diagnose, prescribe, or claim to treat or cure disease. Do not recommend ingesting essential oils. Mention safe dilution and professional guidance when essential oils are relevant. If symptoms may be urgent or serious, advise contacting local emergency services or a qualified healthcare professional. Encourage medical review for persistent, worsening, pregnancy-related, medication-related, child-related, or chronic symptoms. Answer the actual question and finish with a brief note that this is general education, not medical advice.",
+   input:question,
+  }),
+ });
+ const result=await response.json().catch(()=>({}));
+ if(!response.ok){console.error("Wellness answer service error",response.status,result?.error?.message||"");return res.json({answer:generalWellnessAnswer(question)});}
+ const answer=result.output_text||result.output?.flatMap((item)=>item.content||[]).find((item)=>item.type==="output_text")?.text;
+ if(!answer)return res.json({answer:generalWellnessAnswer(question)});
+ res.json({answer});
+}));
 
 router.post("/assessments",optionalAuth,asyncRoute(async(req,res)=>{
   const answers=Array.isArray(req.body.answers)?req.body.answers:[];

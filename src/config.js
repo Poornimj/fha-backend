@@ -7,6 +7,21 @@ export const config = {
   frontendOrigin: process.env.FRONTEND_ORIGIN || "http://127.0.0.1:5173",
   nodeEnv: process.env.NODE_ENV || "development",
   publicUrl: process.env.PUBLIC_URL || "http://127.0.0.1:4000",
+  frontendUrl: process.env.FRONTEND_URL || process.env.FRONTEND_ORIGIN || "http://127.0.0.1:5173",
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY,
+    model: process.env.OPENAI_MODEL || "gpt-5.6-luna",
+  },
+  reviewRecipients: (process.env.WELLNESS_REVIEW_RECIPIENTS || "jianxinfang25@gmail.com,suvi@happinessacademy.fi")
+    .split(",").map((value) => value.trim()).filter(Boolean),
+  mail: {
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: String(process.env.SMTP_SECURE || "false").toLowerCase() === "true",
+    user: process.env.SMTP_USER,
+    password: process.env.SMTP_PASSWORD,
+    from: process.env.MAIL_FROM || "Happy Drops <no-reply@happydrops.com>",
+  },
 };
 
 export function validateConfig() {

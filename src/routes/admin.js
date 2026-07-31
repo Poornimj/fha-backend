@@ -2,9 +2,73 @@ import express from "express";
 import { pool } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { asyncRoute, integer, text, uuid } from "../lib/http.js";
+import { sendWellnessStatusEmail } from "../services/email.js";
 
 const router=express.Router();
 router.use(requireAuth,requireRole("STAFF","ADMIN"));
+
+const wellnessStatuses=["SUBMITTED","UNDER_REVIEW","RECIPE_READY","PAYMENT_PENDING","PAID","IN_PREPARATION","READY_FOR_PICKUP","COMPLETED","CANCELLED"];
+const wellnessPaymentStatuses=["PENDING","AUTHORIZED","PAID","FAILED","CANCELLED","REFUNDED"];
+
+router.get("/wellness-cases",asyncRoute(async(req,res)=>{
+ const status=text(req.query.status,"Status",{max:40})?.toUpperCase()||null;
+ const search=text(req.query.search,"Search",{max:200});
+ if(status&&!wellnessStatuses.includes(status))return res.status(400).json({message:"Invalid wellness status."});
+ const r=await pool.query(`SELECT c.*,u.email,u.first_name,u.family_name,u.phone,
+  COALESCE((SELECT json_agg(h ORDER BY h.created_at) FROM wellness_review_history h WHERE h.case_id=c.id),'[]') history
+  FROM wellness_review_cases c JOIN users u ON u.id=c.user_id
+  WHERE ($1::text IS NULL OR c.status=$1)
+  AND ($2::text IS NULL OR concat_ws(' ',c.reference,u.first_name,u.family_name,u.email,c.profile_snapshot->>'current_symptoms') ILIKE $2)
+  ORDER BY c.created_at DESC LIMIT 200`,[status,search?`%${search}%`:null]);
+ res.json({cases:r.rows});
+}));
+
+router.patch("/wellness-cases/:id",asyncRoute(async(req,res)=>{
+ const status=text(req.body.status,"Status",{required:true,max:40}).toUpperCase();
+ if(!wellnessStatuses.includes(status))return res.status(400).json({message:"Invalid wellness status."});
+ const paymentStatus=text(req.body.paymentStatus,"Payment status",{max:40})?.toUpperCase()||null;
+ if(paymentStatus&&!wellnessPaymentStatuses.includes(paymentStatus))return res.status(400).json({message:"Invalid payment status."});
+ const ingredients=req.body.recipeIngredients;
+ if(ingredients!==undefined&&!Array.isArray(ingredients))return res.status(400).json({message:"Recipe ingredients must be a list."});
+ const price=req.body.price===""||req.body.price==null?null:Number(req.body.price);
+ if(price!==null&&(!Number.isFinite(price)||price<0))return res.status(400).json({message:"Price is invalid."});
+ const message=text(req.body.reviewerMessage,"Customer message",{max:10000});
+ const visible=req.body.visibleToCustomer!==false;
+ const client=await pool.connect();
+ let reviewCase;
+ let customer;
+ try{
+  await client.query("BEGIN");
+  const r=await client.query(`UPDATE wellness_review_cases SET
+   status=$1::varchar,reviewer_id=$2,reviewer_message=COALESCE($3::text,reviewer_message),
+   recipe_title=COALESCE($4,recipe_title),recipe_instructions=COALESCE($5,recipe_instructions),
+   recipe_ingredients=COALESCE($6::jsonb,recipe_ingredients),safety_notes=COALESCE($7,safety_notes),
+   price=COALESCE($8,price),currency=COALESCE($9,currency),payment_status=COALESCE($10,payment_status),
+   pickup_location=COALESCE($11,pickup_location),pickup_date=COALESCE($12::date,pickup_date),pickup_time=COALESCE($13::time,pickup_time),
+   reviewed_at=CASE WHEN $1::varchar IN('UNDER_REVIEW','RECIPE_READY','PAYMENT_PENDING','PAID','IN_PREPARATION','READY_FOR_PICKUP','COMPLETED') THEN COALESCE(reviewed_at,now()) ELSE reviewed_at END,
+   paid_at=CASE WHEN $1::varchar IN('PAID','IN_PREPARATION','READY_FOR_PICKUP','COMPLETED') OR $10::varchar='PAID' THEN COALESCE(paid_at,now()) ELSE paid_at END,
+   ready_at=CASE WHEN $1::varchar IN('READY_FOR_PICKUP','COMPLETED') THEN COALESCE(ready_at,now()) ELSE ready_at END,
+   completed_at=CASE WHEN $1::varchar='COMPLETED' THEN COALESCE(completed_at,now()) ELSE completed_at END,
+   updated_at=now() WHERE id=$14 RETURNING *`,[
+    status,req.user.id,message,text(req.body.recipeTitle,"Recipe title",{max:250}),
+    text(req.body.recipeInstructions,"Recipe instructions",{max:10000}),
+    ingredients===undefined?null:JSON.stringify(ingredients),text(req.body.safetyNotes,"Safety notes",{max:5000}),
+    price,text(req.body.currency,"Currency",{max:3})?.toUpperCase()||null,paymentStatus,
+    text(req.body.pickupLocation,"Pickup location",{max:2000}),req.body.pickupDate||null,req.body.pickupTime||null,
+    uuid(req.params.id,"Wellness case ID")]);
+  if(!r.rows[0]){await client.query("ROLLBACK");return res.status(404).json({message:"Wellness case not found."});}
+  reviewCase=r.rows[0];
+  await client.query(`INSERT INTO wellness_review_history(case_id,status,message,changed_by,visible_to_customer)
+   VALUES($1,$2,$3,$4,$5)`,[reviewCase.id,status,message||`Status changed to ${status.replaceAll("_"," ").toLowerCase()}.`,req.user.id,visible]);
+  const userResult=await client.query("SELECT id,email,first_name,family_name FROM users WHERE id=$1",[reviewCase.user_id]);
+  customer=userResult.rows[0];
+  await client.query(`INSERT INTO audit_logs(actor_user_id,action,entity_type,entity_id,details,ip_address)
+   VALUES($1,'WELLNESS_CASE_UPDATED','wellness_review_case',$2,$3::jsonb,$4)`,[req.user.id,reviewCase.id,JSON.stringify({status,paymentStatus:reviewCase.payment_status,visibleToCustomer:visible}),req.ip]);
+  await client.query("COMMIT");
+ }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
+ const emailDelivery=req.body.notifyCustomer===false?{skipped:true}:await sendWellnessStatusEmail({user:customer,reviewCase});
+ res.json({reviewCase,emailDelivery});
+}));
 
 router.patch("/orders/:id/status",asyncRoute(async(req,res)=>{
  const status=text(req.body.status,"Status",{required:true,max:40}).toUpperCase();
@@ -41,6 +105,12 @@ router.patch("/knowledge/recipes/:id/status",asyncRoute(async(req,res)=>{
 router.patch("/products/:id/inventory",asyncRoute(async(req,res)=>{const quantity=integer(req.body.quantity,"Quantity",{min:-100000,max:100000,required:true});if(quantity===0)return res.status(400).json({message:"Quantity must not be zero."});const client=await pool.connect();try{await client.query("BEGIN");const r=await client.query("UPDATE products SET stock_quantity=stock_quantity+$1,updated_at=now() WHERE id=$2 AND stock_quantity+$1>=0 RETURNING *",[quantity,uuid(req.params.id)]);if(!r.rows[0]){await client.query("ROLLBACK");return res.status(409).json({message:"Inventory adjustment is invalid."});}await client.query("INSERT INTO inventory_transactions(product_id,quantity,reason,reference,notes) VALUES($1,$2,'ADJUSTMENT',$3,$4)",[r.rows[0].id,quantity,text(req.body.reference,"Reference",{max:150}),text(req.body.notes,"Notes",{max:2000})]);await client.query("COMMIT");res.json({product:r.rows[0]});}catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}}));
 router.patch("/workshops/:id",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
  const theme=text(req.body.theme,"Theme",{max:200});
+ const sessionDate=text(req.body.sessionDate,"Workshop date",{max:10});
+ const sessionTime=text(req.body.sessionTime,"Workshop time",{max:5});
+ if((sessionDate&&!/^\d{4}-\d{2}-\d{2}$/.test(sessionDate))||(sessionTime&&!/^\d{2}:\d{2}$/.test(sessionTime))){
+  return res.status(400).json({message:"Workshop date or time is invalid."});
+ }
+ if(Boolean(sessionDate)!==Boolean(sessionTime))return res.status(400).json({message:"Enter both the workshop date and time."});
  let imageUrl;
  if(req.body.posterDataUrl!==undefined){
   imageUrl=String(req.body.posterDataUrl||"");
@@ -49,14 +119,28 @@ router.patch("/workshops/:id",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
   }
   if(imageUrl.length>5_600_000)return res.status(413).json({message:"Poster must be smaller than 4 MB."});
  }
- const r=await pool.query(`UPDATE workshops SET
-  theme=COALESCE($1,theme),
-  image_url=CASE WHEN $2::boolean THEN NULLIF($3,'') ELSE image_url END,
-  updated_at=now()
-  WHERE id=$4 RETURNING *`,
-  [theme,req.body.posterDataUrl!==undefined,imageUrl||"",uuid(req.params.id,"Workshop ID")]);
- if(!r.rows[0])return res.status(404).json({message:"Workshop not found."});
- res.json({workshop:r.rows[0]});
+ const workshopId=uuid(req.params.id,"Workshop ID");
+ const client=await pool.connect();
+ try{
+  await client.query("BEGIN");
+  const updated=await client.query(`UPDATE workshops SET
+   theme=COALESCE($1,theme),image_url=CASE WHEN $2::boolean THEN NULLIF($3,'') ELSE image_url END,updated_at=now()
+   WHERE id=$4 RETURNING *`,[theme,req.body.posterDataUrl!==undefined,imageUrl||"",workshopId]);
+  if(!updated.rows[0]){await client.query("ROLLBACK");return res.status(404).json({message:"Workshop not found."});}
+  if(sessionDate&&sessionTime){
+   const session=await client.query(`UPDATE workshop_sessions SET
+    starts_at=$1::date+$2::time,ends_at=$1::date+$2::time+($3::int*interval '1 minute')
+    WHERE id=(SELECT id FROM workshop_sessions WHERE workshop_id=$4 AND status='ACTIVE' ORDER BY starts_at LIMIT 1) RETURNING id`,
+    [sessionDate,sessionTime,updated.rows[0].duration_minutes||120,workshopId]);
+   if(!session.rows[0])await client.query(`INSERT INTO workshop_sessions(workshop_id,starts_at,ends_at,location,capacity,price_per_person,status)
+    VALUES($1,$2::date+$3::time,$2::date+$3::time+($4::int*interval '1 minute'),'Location to be confirmed',$5,$6,'ACTIVE')`,
+    [workshopId,sessionDate,sessionTime,updated.rows[0].duration_minutes||120,updated.rows[0].max_participants||30,updated.rows[0].default_price]);
+  }
+  const result=await client.query(`SELECT w.*,COALESCE(json_agg(s ORDER BY s.starts_at) FILTER(WHERE s.id IS NOT NULL),'[]') sessions
+   FROM workshops w LEFT JOIN workshop_sessions s ON s.workshop_id=w.id AND s.status='ACTIVE' WHERE w.id=$1 GROUP BY w.id`,[workshopId]);
+  await client.query("COMMIT");
+  res.json({workshop:result.rows[0]});
+ }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
 }));
 router.get("/workshops/requests",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
  const location=text(req.query.location,"Location",{max:250});

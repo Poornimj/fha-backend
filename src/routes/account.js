@@ -1,7 +1,9 @@
 import express from "express";
+import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
 import { asyncRoute, text, uuid } from "../lib/http.js";
+import { sendWellnessSubmissionEmails } from "../services/email.js";
 
 const router=express.Router();
 router.use(requireAuth);
@@ -11,27 +13,57 @@ router.put("/wellness-profile",asyncRoute(async(req,res)=>{
   const symptomsDuration=text(req.body.symptomsDuration,"Symptoms duration",{required:true,max:250});
   const symptomsFrequency=text(req.body.symptomsFrequency,"Symptoms frequency",{required:true,max:250});
   if(!req.body.consentGiven)return res.status(400).json({message:"Privacy and terms consent is required."});
-  const r=await pool.query(`INSERT INTO user_wellness_profiles(
-    user_id,current_symptoms,symptoms_duration,symptoms_frequency,takes_medication,
-    medication_details,ongoing_conditions,family_medical_history,treatments_tried,
-    chronic_diseases,wellness_goals,consent_given,updated_at
-  ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,now())
-  ON CONFLICT(user_id) DO UPDATE SET
-    current_symptoms=EXCLUDED.current_symptoms,symptoms_duration=EXCLUDED.symptoms_duration,
-    symptoms_frequency=EXCLUDED.symptoms_frequency,takes_medication=EXCLUDED.takes_medication,
-    medication_details=EXCLUDED.medication_details,ongoing_conditions=EXCLUDED.ongoing_conditions,
-    family_medical_history=EXCLUDED.family_medical_history,treatments_tried=EXCLUDED.treatments_tried,
-    chronic_diseases=EXCLUDED.chronic_diseases,wellness_goals=EXCLUDED.wellness_goals,
-    consent_given=true,updated_at=now() RETURNING *`,[
-      req.user.id,currentSymptoms,symptomsDuration,symptomsFrequency,Boolean(req.body.takesMedication),
-      text(req.body.medicationDetails,"Medication details",{max:4000}),
-      text(req.body.ongoingConditions,"Ongoing conditions",{max:4000}),
-      text(req.body.familyMedicalHistory,"Family medical history",{max:4000}),
-      text(req.body.treatmentsTried,"Treatments tried",{max:4000}),
-      text(req.body.chronicDiseases,"Chronic diseases",{max:4000}),
-      text(req.body.wellnessGoals,"Wellness goals",{max:4000}),
-    ]);
-  res.json({wellnessProfile:r.rows[0]});
+  const values=[
+    req.user.id,currentSymptoms,symptomsDuration,symptomsFrequency,Boolean(req.body.takesMedication),
+    text(req.body.medicationDetails,"Medication details",{max:4000}),
+    text(req.body.ongoingConditions,"Ongoing conditions",{max:4000}),
+    text(req.body.familyMedicalHistory,"Family medical history",{max:4000}),
+    text(req.body.treatmentsTried,"Treatments tried",{max:4000}),
+    text(req.body.chronicDiseases,"Chronic diseases",{max:4000}),
+    text(req.body.wellnessGoals,"Wellness goals",{max:4000}),
+  ];
+  const client=await pool.connect();
+  let profile;
+  let reviewCase;
+  let user;
+  try{
+    await client.query("BEGIN");
+    const profileResult=await client.query(`INSERT INTO user_wellness_profiles(
+      user_id,current_symptoms,symptoms_duration,symptoms_frequency,takes_medication,
+      medication_details,ongoing_conditions,family_medical_history,treatments_tried,
+      chronic_diseases,wellness_goals,consent_given,updated_at
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,now())
+    ON CONFLICT(user_id) DO UPDATE SET
+      current_symptoms=EXCLUDED.current_symptoms,symptoms_duration=EXCLUDED.symptoms_duration,
+      symptoms_frequency=EXCLUDED.symptoms_frequency,takes_medication=EXCLUDED.takes_medication,
+      medication_details=EXCLUDED.medication_details,ongoing_conditions=EXCLUDED.ongoing_conditions,
+      family_medical_history=EXCLUDED.family_medical_history,treatments_tried=EXCLUDED.treatments_tried,
+      chronic_diseases=EXCLUDED.chronic_diseases,wellness_goals=EXCLUDED.wellness_goals,
+      consent_given=true,updated_at=now() RETURNING *`,values);
+    profile=profileResult.rows[0];
+    const reference=`WP-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+    const caseResult=await client.query(`INSERT INTO wellness_review_cases(reference,user_id,wellness_profile_id,profile_snapshot)
+      VALUES($1,$2,$3,$4::jsonb) RETURNING *`,[reference,req.user.id,profile.id,JSON.stringify(profile)]);
+    reviewCase=caseResult.rows[0];
+    await client.query(`INSERT INTO wellness_review_history(case_id,status,message,changed_by,visible_to_customer)
+      VALUES($1,'SUBMITTED',$2,$3,true)`,[reviewCase.id,"Your wellness profile has been received and sent for review.",req.user.id]);
+    const userResult=await client.query("SELECT id,email,first_name,family_name FROM users WHERE id=$1",[req.user.id]);
+    user=userResult.rows[0];
+    await client.query("COMMIT");
+  }catch(error){
+    await client.query("ROLLBACK");
+    throw error;
+  }finally{
+    client.release();
+  }
+  const emailDelivery=await sendWellnessSubmissionEmails({user,profile,reviewCase});
+  res.json({wellnessProfile:profile,reviewCase,emailDelivery});
+}));
+router.get("/wellness-cases",asyncRoute(async(req,res)=>{
+  const r=await pool.query(`SELECT c.*,
+    COALESCE((SELECT json_agg(h ORDER BY h.created_at) FROM wellness_review_history h WHERE h.case_id=c.id AND h.visible_to_customer=true),'[]') history
+    FROM wellness_review_cases c WHERE c.user_id=$1 ORDER BY c.created_at DESC`,[req.user.id]);
+  res.json({cases:r.rows});
 }));
 router.get("/addresses",asyncRoute(async(req,res)=>{const r=await pool.query("SELECT * FROM user_addresses WHERE user_id=$1 ORDER BY is_default DESC,created_at",[req.user.id]);res.json({addresses:r.rows});}));
 router.post("/addresses",asyncRoute(async(req,res)=>{const client=await pool.connect();try{await client.query("BEGIN");if(req.body.isDefault)await client.query("UPDATE user_addresses SET is_default=false WHERE user_id=$1",[req.user.id]);const r=await client.query(`INSERT INTO user_addresses(user_id,type,full_name,phone,street,city,postal_code,country,is_default,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()) RETURNING *`,[req.user.id,req.body.type||"SHIPPING",text(req.body.fullName,"Full name",{required:true,max:200}),text(req.body.phone,"Phone",{max:40}),text(req.body.street,"Street",{required:true,max:250}),text(req.body.city,"City",{required:true,max:120}),text(req.body.postalCode,"Postal code",{required:true,max:30}),text(req.body.country,"Country",{required:true,max:100}),Boolean(req.body.isDefault)]);await client.query("COMMIT");res.status(201).json({address:r.rows[0]});}catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}}));
