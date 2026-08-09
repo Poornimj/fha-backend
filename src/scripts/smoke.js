@@ -20,11 +20,28 @@ let token;
 try {
   const signup = await request("/api/auth/signup", {
     method: "POST",
-    body: JSON.stringify({ email, password: "SmokeTest!234", firstName: "Smoke", familyName: "Test" }),
+    body: JSON.stringify({
+      email, password: "SmokeTest!234", firstName: "Smoke", familyName: "Test", dateOfBirth: "1990-01-15",
+      familyMembers: [{ firstName: "Family", familyName: "Test", relationship: "Child", dateOfBirth: "2015-05-10", wellnessNotes: "Smoke family profile", guardianConfirmed: true }],
+    }),
   });
   token = signup.token;
   const auth = { Authorization: `Bearer ${token}` };
   await request("/api/auth/me", { headers: auth });
+  const family = await request("/api/account/family-members", { headers: auth });
+  const familyMember = family.familyMembers[0];
+  if (!familyMember || familyMember.first_name !== "Family") throw new Error("Family member registration persistence failed.");
+  await request(`/api/account/family-members/${familyMember.id}`, { method: "PATCH", headers: auth, body: JSON.stringify({ firstName: "Family", familyName: "Test", relationship: "Child", dateOfBirth: "2015-05-10", wellnessNotes: "Updated smoke family profile", guardianConfirmed: true }) });
+  const extraFamily = await request("/api/account/family-members", { method: "POST", headers: auth, body: JSON.stringify({ firstName: "Adult", familyName: "Test", relationship: "Sibling", dateOfBirth: "1988-08-08", wellnessNotes: "No current concerns", guardianConfirmed: false }) });
+  await request(`/api/account/family-members/${extraFamily.familyMember.id}`, { method: "DELETE", headers: auth });
+  const updatedAccount = await request("/api/auth/me", { method: "PATCH", headers: auth, body: JSON.stringify({ phone: "+358 40 000 0000", preferredLanguage: "English" }) });
+  if (updatedAccount.user.phone !== "+358 40 000 0000") throw new Error("Personal details update failed.");
+  const createdWish = await request("/api/account/happy-wishes", { method: "POST", headers: auth, body: JSON.stringify({ title: "A joyful family celebration", wishType: "FAMILY", description: "Bring our family together for a meaningful celebration filled with shared memories and wellbeing.", targetDate: "2027-06-01", importance: 5, firstStep: "Choose a date and ask the family which experience would feel most meaningful." }) });
+  if (!createdWish.wish?.momentum_score) throw new Error("Happy Wish score generation failed.");
+  await request(`/api/account/happy-wishes/${createdWish.wish.id}`, { method: "PATCH", headers: auth, body: JSON.stringify({ title: "A joyful family celebration", wishType: "FAMILY", description: "Bring our family together for a meaningful celebration filled with shared memories and wellbeing.", targetDate: "2027-06-01", importance: 5, firstStep: "Choose a date and ask the family which experience would feel most meaningful.", status: "ACHIEVED" }) });
+  const wishes = await request("/api/account/happy-wishes", { headers: auth });
+  if (!wishes.wishes.some((wish) => wish.id === createdWish.wish.id && wish.status === "ACHIEVED")) throw new Error("Happy Wish persistence failed.");
+  await request(`/api/account/happy-wishes/${createdWish.wish.id}`, { method: "DELETE", headers: auth });
   const { products } = await request("/api/products?search=Dew");
   const product = products.find((item) => item.name === "Dew");
   await request("/api/account/wellness-profile", {
@@ -108,7 +125,7 @@ try {
   await request(`/api/orders/track/${created.order.order_number}?email=${encodeURIComponent(email)}`);
   const reset = await request("/api/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) });
   if (reset.resetToken) await request("/api/auth/reset-password", { method: "POST", body: JSON.stringify({ token: reset.resetToken, password: "SmokeTest!567" }) });
-  console.log("Smoke test passed: auth, catalog, cart, assessment, knowledge, workshop, supplier, order, tracking, password reset.");
+  console.log("Smoke test passed: auth, personal details, family profiles, Happy Wishes, catalog, cart, assessment, knowledge, workshop, supplier, order, tracking, password reset.");
 } finally {
   const client = await pool.connect();
   try {

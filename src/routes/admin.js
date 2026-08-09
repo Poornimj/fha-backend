@@ -107,6 +107,8 @@ router.patch("/workshops/:id",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
  const theme=text(req.body.theme,"Theme",{max:200});
  const sessionDate=text(req.body.sessionDate,"Workshop date",{max:10});
  const sessionTime=text(req.body.sessionTime,"Workshop time",{max:5});
+ const sessionLocation=text(req.body.sessionLocation,"Workshop place",{max:250});
+ const durationMinutes=integer(req.body.durationMinutes,"Workshop duration",{min:15,max:1440});
  if((sessionDate&&!/^\d{4}-\d{2}-\d{2}$/.test(sessionDate))||(sessionTime&&!/^\d{2}:\d{2}$/.test(sessionTime))){
   return res.status(400).json({message:"Workshop date or time is invalid."});
  }
@@ -124,23 +126,73 @@ router.patch("/workshops/:id",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
  try{
   await client.query("BEGIN");
   const updated=await client.query(`UPDATE workshops SET
-   theme=COALESCE($1,theme),image_url=CASE WHEN $2::boolean THEN NULLIF($3,'') ELSE image_url END,updated_at=now()
-   WHERE id=$4 RETURNING *`,[theme,req.body.posterDataUrl!==undefined,imageUrl||"",workshopId]);
+   theme=COALESCE($1,theme),image_url=CASE WHEN $2::boolean THEN NULLIF($3,'') ELSE image_url END,
+   duration_minutes=COALESCE($4,duration_minutes),updated_at=now()
+   WHERE id=$5 RETURNING *`,[theme,req.body.posterDataUrl!==undefined,imageUrl||"",durationMinutes,workshopId]);
   if(!updated.rows[0]){await client.query("ROLLBACK");return res.status(404).json({message:"Workshop not found."});}
-  if(sessionDate&&sessionTime){
+  if(sessionDate||sessionTime||sessionLocation||durationMinutes){
    const session=await client.query(`UPDATE workshop_sessions SET
-    starts_at=$1::date+$2::time,ends_at=$1::date+$2::time+($3::int*interval '1 minute')
-    WHERE id=(SELECT id FROM workshop_sessions WHERE workshop_id=$4 AND status='ACTIVE' ORDER BY starts_at LIMIT 1) RETURNING id`,
-    [sessionDate,sessionTime,updated.rows[0].duration_minutes||120,workshopId]);
-   if(!session.rows[0])await client.query(`INSERT INTO workshop_sessions(workshop_id,starts_at,ends_at,location,capacity,price_per_person,status)
-    VALUES($1,$2::date+$3::time,$2::date+$3::time+($4::int*interval '1 minute'),'Location to be confirmed',$5,$6,'ACTIVE')`,
-    [workshopId,sessionDate,sessionTime,updated.rows[0].duration_minutes||120,updated.rows[0].max_participants||30,updated.rows[0].default_price]);
+    starts_at=CASE WHEN $1::date IS NOT NULL AND $2::time IS NOT NULL THEN $1::date+$2::time ELSE starts_at END,
+    ends_at=(CASE WHEN $1::date IS NOT NULL AND $2::time IS NOT NULL THEN $1::date+$2::time ELSE starts_at END)+($3::int*interval '1 minute'),
+    location=COALESCE($4,location)
+    WHERE id=(SELECT id FROM workshop_sessions WHERE workshop_id=$5 AND status='ACTIVE' ORDER BY starts_at LIMIT 1) RETURNING id`,
+    [sessionDate,sessionTime,updated.rows[0].duration_minutes||120,sessionLocation,workshopId]);
+   if(!session.rows[0]&&sessionDate&&sessionTime)await client.query(`INSERT INTO workshop_sessions(workshop_id,starts_at,ends_at,location,capacity,price_per_person,status)
+    VALUES($1,$2::date+$3::time,$2::date+$3::time+($4::int*interval '1 minute'),COALESCE($7,'Location to be confirmed'),$5,$6,'ACTIVE')`,
+    [workshopId,sessionDate,sessionTime,updated.rows[0].duration_minutes||120,updated.rows[0].max_participants||30,updated.rows[0].default_price,sessionLocation]);
   }
   const result=await client.query(`SELECT w.*,COALESCE(json_agg(s ORDER BY s.starts_at) FILTER(WHERE s.id IS NOT NULL),'[]') sessions
    FROM workshops w LEFT JOIN workshop_sessions s ON s.workshop_id=w.id AND s.status='ACTIVE' WHERE w.id=$1 GROUP BY w.id`,[workshopId]);
   await client.query("COMMIT");
   res.json({workshop:result.rows[0]});
  }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
+}));
+
+function workshopSessionInput(body,{partial=false}={}){
+ const sessionDate=text(body.sessionDate,"Workshop date",{max:10});
+ const sessionTime=text(body.sessionTime,"Workshop time",{max:5});
+ const location=text(body.location,"Workshop place",{required:!partial,max:250});
+ const durationMinutes=integer(body.durationMinutes,"Workshop duration",{min:15,max:1440,required:!partial});
+ const capacity=integer(body.capacity,"Workshop capacity",{min:1,max:1000,required:!partial});
+ if((sessionDate&&!/^\d{4}-\d{2}-\d{2}$/.test(sessionDate))||(sessionTime&&!/^\d{2}:\d{2}$/.test(sessionTime))){
+  throw Object.assign(new Error("Workshop date or time is invalid."),{status:400});
+ }
+ if(!partial&&(!sessionDate||!sessionTime))throw Object.assign(new Error("Enter both the workshop date and time."),{status:400});
+ if(partial&&Boolean(sessionDate)!==Boolean(sessionTime))throw Object.assign(new Error("Enter both the workshop date and time."),{status:400});
+ return {sessionDate,sessionTime,location,durationMinutes,capacity};
+}
+
+router.post("/workshops/:id/sessions",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
+ const workshopId=uuid(req.params.id,"Workshop ID");
+ const values=workshopSessionInput(req.body);
+ const workshop=await pool.query("SELECT default_price FROM workshops WHERE id=$1",[workshopId]);
+ if(!workshop.rows[0])return res.status(404).json({message:"Workshop not found."});
+ const result=await pool.query(`INSERT INTO workshop_sessions(workshop_id,starts_at,ends_at,location,capacity,price_per_person,status)
+  VALUES($1,$2::date+$3::time,$2::date+$3::time+($4::int*interval '1 minute'),$5,$6,$7,'ACTIVE') RETURNING *`,
+  [workshopId,values.sessionDate,values.sessionTime,values.durationMinutes,values.location,values.capacity,workshop.rows[0].default_price]);
+ res.status(201).json({session:result.rows[0]});
+}));
+
+router.patch("/workshops/:workshopId/sessions/:sessionId",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
+ const workshopId=uuid(req.params.workshopId,"Workshop ID");
+ const sessionId=uuid(req.params.sessionId,"Session ID");
+ const values=workshopSessionInput(req.body,{partial:true});
+ const result=await pool.query(`UPDATE workshop_sessions SET
+  starts_at=CASE WHEN $1::date IS NOT NULL AND $2::time IS NOT NULL THEN $1::date+$2::time ELSE starts_at END,
+  ends_at=(CASE WHEN $1::date IS NOT NULL AND $2::time IS NOT NULL THEN $1::date+$2::time ELSE starts_at END)
+    +(COALESCE($3::int,GREATEST(15,EXTRACT(EPOCH FROM (ends_at-starts_at))/60)::int)*interval '1 minute'),
+  location=COALESCE($4,location),capacity=COALESCE($5,capacity)
+  WHERE id=$6 AND workshop_id=$7 AND status='ACTIVE' RETURNING *`,
+  [values.sessionDate,values.sessionTime,values.durationMinutes,values.location,values.capacity,sessionId,workshopId]);
+ if(!result.rows[0])return res.status(404).json({message:"Workshop session not found."});
+ res.json({session:result.rows[0]});
+}));
+
+router.delete("/workshops/:workshopId/sessions/:sessionId",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
+ const result=await pool.query("UPDATE workshop_sessions SET status='INACTIVE' WHERE id=$1 AND workshop_id=$2 AND status='ACTIVE' RETURNING id",
+  [uuid(req.params.sessionId,"Session ID"),uuid(req.params.workshopId,"Workshop ID")]);
+ if(!result.rows[0])return res.status(404).json({message:"Workshop session not found."});
+ res.status(204).end();
 }));
 router.get("/workshops/requests",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
  const location=text(req.query.location,"Location",{max:250});

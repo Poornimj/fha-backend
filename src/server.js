@@ -15,6 +15,8 @@ validateConfig();
 const app = express();
 
 const allowedOrigins = config.frontendOrigin.split(",").map((value) => value.trim());
+const isLocalDevelopmentOrigin = (origin) => config.nodeEnv !== "production"
+  && /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(origin);
 app.disable("x-powered-by");
 app.use((_req,res,next)=>{
   res.set("X-Content-Type-Options","nosniff");
@@ -25,7 +27,7 @@ app.use((_req,res,next)=>{
 app.use(
   cors({
     origin(origin, callback) {
-      callback(null, !origin || allowedOrigins.includes(origin));
+      callback(null, !origin || allowedOrigins.includes(origin) || isLocalDevelopmentOrigin(origin));
     },
     credentials: true,
   }),

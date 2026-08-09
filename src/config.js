@@ -9,6 +9,7 @@ export const config = {
   publicUrl: process.env.PUBLIC_URL || "http://127.0.0.1:4000",
   frontendUrl: process.env.FRONTEND_URL || process.env.FRONTEND_ORIGIN || "http://127.0.0.1:5173",
   openai: {
+    enabled: String(process.env.OPENAI_ENABLED || "false").toLowerCase() === "true",
     apiKey: process.env.OPENAI_API_KEY,
     model: process.env.OPENAI_MODEL || "gpt-5.6-luna",
   },

@@ -13,7 +13,7 @@ INSERT INTO workshops (
   ('Special Event Workshop', 'special-event-workshop',
    'A memorable wellness experience for birthdays, celebrations, and special occasions.',
    65, 'EUR', 120, 1, 100, 'ACTIVE', now()),
-  ('Business Wellness Workshop', 'business-wellness-workshop',
+  ('Business Purpose Workshop', 'business-purpose-workshop',
    'Wellness activities designed for meetings, team-building days, and workplace wellbeing.',
    48, 'EUR', 120, 1, 100, 'ACTIVE', now())
 ON CONFLICT (slug) DO UPDATE SET
