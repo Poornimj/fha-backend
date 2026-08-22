@@ -8,6 +8,10 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || "development",
   publicUrl: process.env.PUBLIC_URL || "http://127.0.0.1:4000",
   frontendUrl: process.env.FRONTEND_URL || process.env.FRONTEND_ORIGIN || "http://127.0.0.1:5173",
+  stripe: {
+    secretKey: process.env.STRIPE_SECRET_KEY,
+    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+  },
   openai: {
     enabled: String(process.env.OPENAI_ENABLED || "false").toLowerCase() === "true",
     apiKey: process.env.OPENAI_API_KEY,

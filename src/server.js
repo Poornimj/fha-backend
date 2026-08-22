@@ -9,6 +9,7 @@ import workflowRoutes from "./routes/workflows.js";
 import orderRoutes from "./routes/orders.js";
 import accountRoutes from "./routes/account.js";
 import adminRoutes from "./routes/admin.js";
+import paymentRoutes, { stripeWebhook } from "./routes/payments.js";
 
 validateConfig();
 
@@ -32,6 +33,7 @@ app.use(
     credentials: true,
   }),
 );
+app.post("/api/payments/stripe/webhook", express.raw({ type: "application/json" }), stripeWebhook);
 app.use(express.json({ limit: "12mb" }));
 
 app.get("/api/health", (_req, res) => {
@@ -45,6 +47,7 @@ app.use("/api", workflowRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/account", accountRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/payments", paymentRoutes);
 
 app.use((_req,res)=>res.status(404).json({message:"API route not found."}));
 

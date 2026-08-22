@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/routes/auth.js && node --check src/routes/catalog.js && node --check src/routes/cart.js && node --check src/routes/workflows.js && node --check src/routes/orders.js && node --check src/routes/account.js && node --check src/routes/admin.js && node --check src/services/email.js",
+    "check": "node --check src/server.js && node --check src/routes/auth.js && node --check src/routes/catalog.js && node --check src/routes/cart.js && node --check src/routes/workflows.js && node --check src/routes/orders.js && node --check src/routes/account.js && node --check src/routes/admin.js && node --check src/routes/payments.js && node --check src/services/email.js && node --check src/services/stripe.js",
     "db:migrate": "node src/scripts/migrate.js",
-    "test:smoke": "node src/scripts/smoke.js"
+    "test:smoke": "node src/scripts/smoke.js",
+    "test:payments": "node --test test/stripe.test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -17,6 +18,7 @@
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "^7.0.3",
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "stripe": "^22.5.0"
   }
 }

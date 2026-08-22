@@ -49,10 +49,36 @@ production database before applying migrations.
 - `/api/account` — addresses, favorites and booking history
 - `/api/admin` — staff order, supplier, knowledge and inventory workflows
 
-Checkout records payments with `PENDING` status through the manual provider.
-Production charging requires a payment provider adapter and webhook credentials;
-card details must never be sent to or stored by this API.
+## Stripe Checkout
+
+Payments use Stripe-hosted Checkout. Happy Drops calculates prices from the
+database and never receives or stores card details. Set these server-only values:
+
+- `STRIPE_SECRET_KEY` — Stripe test secret key (`sk_test_...` while testing)
+- `STRIPE_WEBHOOK_SECRET` — signing secret for the deployed webhook endpoint
+- `FRONTEND_URL` — the exact public frontend URL used for success/cancel redirects
+
+The Stripe webhook endpoint is:
+
+```text
+POST /api/payments/stripe/webhook
+```
+
+In Stripe Workbench, create an HTTPS webhook for
+`https://YOUR-API-DOMAIN/api/payments/stripe/webhook` and subscribe to
+`checkout.session.completed`, `checkout.session.async_payment_succeeded`, and
+`checkout.session.expired`.
+Use the endpoint signing secret as `STRIPE_WEBHOOK_SECRET`. Run
+`npm run db:migrate` after deployment, then restart the backend. Do not place
+Stripe secret or webhook keys in the frontend `.env` file or Git.
+
+For local testing, use Stripe CLI to forward events to
+`http://127.0.0.1:4000/api/payments/stripe/webhook`. Stripe test card
+`4242 4242 4242 4242` can be used with any future expiry date and any CVC.
 
 `FRONTEND_ORIGIN` accepts a comma-separated list of allowed browser origins.
 Set `PUBLIC_URL`, `FRONTEND_ORIGIN`, `DATABASE_URL`, `JWT_SECRET`, and
-`NODE_ENV=production` in the deployed environment.
+`NODE_ENV=production` in the deployed environment. Before accepting real money,
+activate and verify the Stripe account, replace test keys with live keys, create
+a separate live webhook, and complete a low-value end-to-end live payment and
+refund check.
