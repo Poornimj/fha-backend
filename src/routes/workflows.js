@@ -134,6 +134,33 @@ router.post("/suppliers",asyncRoute(async(req,res)=>{
  }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
 }));
 
+router.post("/therapists/applications",asyncRoute(async(req,res)=>{
+ if(!req.body.consentGiven)return res.status(400).json({message:"Consent is required."});
+ const certificate=req.body.certificate||{};
+ const dataUrl=String(certificate.dataUrl||"");
+ if(certificate.type!=="aromatherapist-certificate")return res.status(400).json({message:"An aromatherapist certificate is required."});
+ if(!/^data:(image\/(png|jpeg|webp)|application\/pdf|application\/msword|application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document);base64,[A-Za-z0-9+/=]+$/.test(dataUrl)){
+  return res.status(400).json({message:"The certificate has an unsupported format."});
+ }
+ if(dataUrl.length>4_300_000)return res.status(413).json({message:"The certificate must be smaller than 3 MB."});
+ const client=await pool.connect();
+ try{
+  await client.query("BEGIN");
+  const r=await client.query(`INSERT INTO therapist_applications(full_name,email,phone,location,qualifications,years_experience,customers_served,short_cv,passion,consent_given,updated_at)
+   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,true,now()) RETURNING id,status,created_at`,[
+    text(req.body.fullName,"Full name",{required:true,max:200}),email(req.body.email),
+    text(req.body.phone,"Phone",{required:true,max:40}),text(req.body.location,"Location",{required:true,max:250}),
+    text(req.body.qualifications,"Qualifications",{required:true,max:4000}),
+    integer(req.body.yearsExperience,"Years of experience",{min:0,max:80,required:true}),
+    integer(req.body.customersServed,"Customers served",{min:0,max:100000,required:true}),
+    text(req.body.shortCv,"Short CV",{required:true,max:8000}),text(req.body.passion,"Passion",{required:true,max:5000})]);
+  await client.query(`INSERT INTO therapist_documents(application_id,document_type,file_url,original_name)
+   VALUES($1,$2,$3,$4)`,[r.rows[0].id,"aromatherapist-certificate",dataUrl,text(certificate.name,"Certificate file name",{required:true,max:255})]);
+  await client.query("COMMIT");
+  res.status(201).json({application:r.rows[0]});
+ }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
+}));
+
 router.post("/contact",asyncRoute(async(req,res)=>{const r=await pool.query("INSERT INTO contact_messages(full_name,email,subject,message) VALUES($1,$2,$3,$4) RETURNING id,created_at",[text(req.body.name,"Name",{required:true,max:200}),email(req.body.email),text(req.body.subject,"Subject",{max:200}),text(req.body.message,"Message",{required:true,max:5000})]);res.status(201).json({message:"Message received.",id:r.rows[0].id});}));
 router.post("/newsletter",asyncRoute(async(req,res)=>{const value=email(req.body.email);await pool.query(`INSERT INTO newsletter_subscribers(email) VALUES($1) ON CONFLICT(email) DO UPDATE SET unsubscribed_at=NULL,consented_at=now()`,[value]);res.status(201).json({message:"Subscription saved."});}));
 export default router;

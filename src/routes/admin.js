@@ -86,6 +86,16 @@ router.get("/suppliers",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
  res.json({applications:r.rows});
 }));
 router.patch("/suppliers/:id",requireRole("ADMIN"),asyncRoute(async(req,res)=>{const status=text(req.body.status,"Status",{required:true,max:40}).toUpperCase();const allowed=["SUBMITTED","UNDER_REVIEW","APPROVED","REJECTED","WITHDRAWN"];if(!allowed.includes(status))return res.status(400).json({message:"Invalid application status."});const r=await pool.query("UPDATE supplier_applications SET status=$1,admin_notes=$2,updated_at=now() WHERE id=$3 RETURNING *",[status,text(req.body.adminNotes,"Admin notes",{max:5000}),uuid(req.params.id)]);if(!r.rows[0])return res.status(404).json({message:"Application not found."});res.json({application:r.rows[0]});}));
+router.get("/therapists",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
+ const status=text(req.query.status,"Status",{max:40})?.toUpperCase()||null;
+ const search=text(req.query.search,"Search",{max:200});
+ const r=await pool.query(`SELECT ta.*,COALESCE((SELECT json_agg(td ORDER BY td.created_at) FROM therapist_documents td WHERE td.application_id=ta.id),'[]') documents
+  FROM therapist_applications ta WHERE ($1::text IS NULL OR ta.status::text=$1)
+  AND ($2::text IS NULL OR concat_ws(' ',ta.full_name,ta.email,ta.phone,ta.location,ta.qualifications) ILIKE $2)
+  ORDER BY ta.created_at DESC`,[status,search?`%${search}%`:null]);
+ res.json({applications:r.rows});
+}));
+router.patch("/therapists/:id",requireRole("ADMIN"),asyncRoute(async(req,res)=>{const status=text(req.body.status,"Status",{required:true,max:40}).toUpperCase();const allowed=["SUBMITTED","UNDER_REVIEW","APPROVED","REJECTED","WITHDRAWN"];if(!allowed.includes(status))return res.status(400).json({message:"Invalid application status."});const r=await pool.query("UPDATE therapist_applications SET status=$1,admin_notes=$2,updated_at=now() WHERE id=$3 RETURNING *",[status,text(req.body.adminNotes,"Admin notes",{max:5000}),uuid(req.params.id)]);if(!r.rows[0])return res.status(404).json({message:"Application not found."});res.json({application:r.rows[0]});}));
 router.post("/knowledge/questions/:id/answers",asyncRoute(async(req,res)=>{const client=await pool.connect();try{await client.query("BEGIN");const r=await client.query("INSERT INTO knowledge_answers(question_id,answered_by,answer,is_published) VALUES($1,$2,$3,$4) RETURNING *",[uuid(req.params.id),req.user.id,text(req.body.answer,"Answer",{required:true,max:10000}),req.body.isPublished!==false]);await client.query("UPDATE knowledge_questions SET status='answered',updated_at=now() WHERE id=$1",[req.params.id]);await client.query("COMMIT");res.status(201).json({answer:r.rows[0]});}catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}}));
 router.post("/knowledge/questions/:id/recipes",asyncRoute(async(req,res)=>{
  const question=await pool.query("SELECT user_id FROM knowledge_questions WHERE id=$1",[uuid(req.params.id)]);
