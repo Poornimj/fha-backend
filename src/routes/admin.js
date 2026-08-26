@@ -236,5 +236,318 @@ router.get("/workshops/requests",requireRole("ADMIN"),asyncRoute(async(req,res)=
   ORDER BY wr.preferred_date DESC NULLS LAST,wr.created_at DESC LIMIT $6 OFFSET $7`,[...params,limit,offset]);
  res.json({requests:r.rows,summary:summary.rows[0],pagination:{page,limit,total:summary.rows[0].total_bookings,totalPages:Math.max(1,Math.ceil(summary.rows[0].total_bookings/limit))}});
 }));
+router.get("/customers", requireRole("ADMIN"), asyncRoute(async (req, res) => {
+  const search = text(req.query.search, "Search", { max: 200 });
+  const isExport = req.query.export === "true";
+
+  const result = await pool.query(`
+    SELECT
+      u.id,
+      u.email,
+      u.first_name,
+      u.family_name,
+      u.phone,
+      u.address,
+      u.date_of_birth,
+      u.preferred_language,
+      u.role,
+      u.account_type,
+      u.company_name,
+      u.business_id,
+      u.is_active,
+      u.created_at,
+      u.updated_at,
+
+      (SELECT COUNT(*)
+       FROM orders o
+       WHERE o.user_id = u.id) AS order_count,
+
+      (SELECT COUNT(*)
+       FROM workshop_requests wr
+       WHERE wr.user_id = u.id) AS workshop_request_count,
+
+      (SELECT COUNT(*)
+       FROM wellness_review_cases wc
+       WHERE wc.user_id = u.id) AS wellness_case_count
+
+    FROM users u
+
+    WHERE u.role = 'CUSTOMER'
+AND (
+  $1::text IS NULL
+  OR concat_ws(
+    ' ',
+    u.first_name,
+    u.family_name,
+    u.email,
+    u.phone,
+    u.company_name,
+    u.business_id
+  ) ILIKE $1
+)
+
+    ORDER BY u.created_at DESC
+    LIMIT ${isExport ? 5000 : 500}
+  `, [search ? `%${search}%` : null]);
+  if (isExport) {
+  const rows = result.rows;
+
+  const csvEscape = (value) => {
+    const textValue = String(value ?? "");
+    return `"${textValue.replaceAll('"', '""')}"`;
+  };
+
+  const header = [
+    "First Name",
+    "Family Name",
+    "Email",
+    "Phone",
+    "Account Type",
+    "Company",
+    "Business ID",
+    "Preferred Language",
+    "Active",
+    "Registered",
+    "Orders",
+    "Workshop Requests",
+    "Wellness Cases"
+  ];
+
+  const csv = [
+    header.map(csvEscape).join(","),
+    ...rows.map((customer) => [
+      customer.first_name,
+      customer.family_name,
+      customer.email,
+      customer.phone,
+      customer.account_type,
+      customer.company_name,
+      customer.business_id,
+      customer.preferred_language,
+      customer.is_active,
+      customer.created_at,
+      customer.order_count,
+      customer.workshop_request_count,
+      customer.wellness_case_count
+    ].map(csvEscape).join(","))
+  ].join("\n");
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", "attachment; filename=happy-drops-customers.csv");
+  return res.send("\uFEFF" + csv);
+}
+
+  res.json({ customers: result.rows });
+}));
+router.patch("/customers/:id/status", requireRole("ADMIN"), asyncRoute(async (req, res) => {
+  const customerId = uuid(req.params.id, "Customer ID");
+
+  if (typeof req.body.isActive !== "boolean") {
+    return res.status(400).json({
+      message: "isActive must be true or false."
+    });
+  }
+
+  const result = await pool.query(
+    `UPDATE users
+     SET is_active = $1,
+         updated_at = now()
+     WHERE id = $2
+       AND role = 'CUSTOMER'
+     RETURNING
+       id,
+       email,
+       first_name,
+       family_name,
+       is_active,
+       updated_at`,
+    [req.body.isActive, customerId]
+  );
+
+  if (!result.rows[0]) {
+    return res.status(404).json({
+      message: "Customer not found."
+    });
+  }
+
+  res.json({ customer: result.rows[0] });
+}));
+router.get("/orders", requireRole("ADMIN"), asyncRoute(async (req, res) => {
+  const search = text(req.query.search, "Search", { max: 200 });
+  const status = text(req.query.status, "Status", { max: 40 })?.toUpperCase() || null;
+  const paymentStatus = text(req.query.paymentStatus, "Payment status", { max: 40 })?.toUpperCase() || null;
+  const isExport = req.query.export === "true";
+
+  const result = await pool.query(`
+    SELECT
+      o.id,
+      o.order_number,
+      o.user_id,
+      o.email,
+      o.phone,
+      o.status,
+      o.payment_status,
+      o.subtotal,
+      o.shipping_amount,
+      o.tax_amount,
+      o.discount_amount,
+      o.total,
+      o.currency,
+      o.billing_address,
+      o.shipping_address,
+      o.customer_notes,
+      o.created_at,
+      o.updated_at,
+
+      u.first_name,
+      u.family_name,
+
+      COALESCE(
+        (
+          SELECT json_agg(
+            json_build_object(
+              'product_name', oi.product_name,
+              'sku', oi.sku,
+              'unit_price', oi.unit_price,
+              'quantity', oi.quantity,
+              'line_total', oi.line_total
+            )
+            ORDER BY oi.product_name
+          )
+          FROM order_items oi
+          WHERE oi.order_id = o.id
+        ),
+        '[]'::json
+      ) AS items,
+
+      COALESCE(
+        (
+          SELECT json_agg(
+            json_build_object(
+              'id', p.id,
+              'provider', p.provider,
+              'method_type', p.method_type,
+              'amount', p.amount,
+              'refunded_amount', p.refunded_amount,
+              'currency', p.currency,
+              'status', p.status,
+              'paid_at', p.paid_at,
+              'provider_transaction_id', p.provider_transaction_id,
+              'stripe_checkout_session_id', p.stripe_checkout_session_id,
+              'stripe_payment_intent_id', p.stripe_payment_intent_id,
+              'failure_message', p.failure_message,
+              'created_at', p.created_at
+            )
+            ORDER BY p.created_at DESC
+          )
+          FROM payments p
+          WHERE p.order_id = o.id
+        ),
+        '[]'::json
+      ) AS payments
+
+    FROM orders o
+    LEFT JOIN users u ON u.id = o.user_id
+
+    WHERE
+      ($1::text IS NULL OR o.status::text = $1)
+      AND ($2::text IS NULL OR o.payment_status::text = $2)
+      AND (
+        $3::text IS NULL
+        OR concat_ws(
+          ' ',
+          o.order_number,
+          o.email,
+          o.phone,
+          u.first_name,
+          u.family_name
+        ) ILIKE $3
+      )
+
+    ORDER BY o.created_at DESC
+    LIMIT ${isExport ? 5000 : 500}
+  `, [
+    status,
+    paymentStatus,
+    search ? `%${search}%` : null
+  ]);
+  if (isExport) {
+  const csvEscape = (value) => {
+    const textValue = String(value ?? "");
+    return `"${textValue.replaceAll('"', '""')}"`;
+  };
+
+  const header = [
+    "Order Number",
+    "Customer First Name",
+    "Customer Family Name",
+    "Email",
+    "Phone",
+    "Order Status",
+    "Payment Status",
+    "Subtotal",
+    "Shipping",
+    "Tax",
+    "Discount",
+    "Total",
+    "Currency",
+    "Products",
+    "Payment Provider",
+    "Payment Method",
+    "Payment Amount",
+    "Payment Record Status",
+    "Paid At",
+    "Stripe Checkout Session",
+    "Stripe Payment Intent",
+    "Created At"
+  ];
+
+  const csv = [
+    header.map(csvEscape).join(","),
+    ...result.rows.map((order) => {
+      const products = (order.items || [])
+        .map((item) => `${item.quantity} x ${item.product_name}`)
+        .join("; ");
+
+      const latestPayment = order.payments?.[0] || {};
+
+      return [
+        order.order_number,
+        order.first_name,
+        order.family_name,
+        order.email,
+        order.phone,
+        order.status,
+        order.payment_status,
+        order.subtotal,
+        order.shipping_amount,
+        order.tax_amount,
+        order.discount_amount,
+        order.total,
+        order.currency,
+        products,
+        latestPayment.provider,
+        latestPayment.method_type,
+        latestPayment.amount,
+        latestPayment.status,
+        latestPayment.paid_at,
+        latestPayment.stripe_checkout_session_id,
+        latestPayment.stripe_payment_intent_id,
+        order.created_at
+      ].map(csvEscape).join(",");
+    })
+  ].join("\n");
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    "attachment; filename=happy-drops-orders-payments.csv"
+  );
+
+  return res.send("\uFEFF" + csv);
+}
+
+  res.json({ orders: result.rows });
+}));
 router.get("/dashboard",asyncRoute(async(_req,res)=>{const r=await pool.query(`SELECT (SELECT count(*) FROM orders) orders,(SELECT count(*) FROM orders WHERE status IN('PENDING','CONFIRMED','PROCESSING')) open_orders,(SELECT count(*) FROM supplier_applications WHERE status IN('SUBMITTED','UNDER_REVIEW')) supplier_applications,(SELECT count(*) FROM knowledge_questions WHERE status IN('submitted','reviewing')) knowledge_questions,(SELECT count(*) FROM products WHERE stock_quantity<=5 AND status='ACTIVE') low_stock`);res.json({dashboard:r.rows[0]});}));
 export default router;
