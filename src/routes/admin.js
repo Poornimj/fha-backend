@@ -96,6 +96,43 @@ router.get("/therapists",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
  res.json({applications:r.rows});
 }));
 router.patch("/therapists/:id",requireRole("ADMIN"),asyncRoute(async(req,res)=>{const status=text(req.body.status,"Status",{required:true,max:40}).toUpperCase();const allowed=["SUBMITTED","UNDER_REVIEW","APPROVED","REJECTED","WITHDRAWN"];if(!allowed.includes(status))return res.status(400).json({message:"Invalid application status."});const r=await pool.query("UPDATE therapist_applications SET status=$1,admin_notes=$2,updated_at=now() WHERE id=$3 RETURNING *",[status,text(req.body.adminNotes,"Admin notes",{max:5000}),uuid(req.params.id)]);if(!r.rows[0])return res.status(404).json({message:"Application not found."});res.json({application:r.rows[0]});}));
+router.get("/knowledge/questions",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
+ const status=text(req.query.status,"Status",{max:40})?.toLowerCase()||null;
+ const search=text(req.query.search,"Search",{max:200});
+ if(status&&!['submitted','reviewing','answered','closed'].includes(status))return res.status(400).json({message:"Invalid question status."});
+ const result=await pool.query(`SELECT q.*,u.first_name,u.family_name,u.email,u.phone,
+  COALESCE((SELECT json_agg(a ORDER BY a.created_at) FROM knowledge_answers a WHERE a.question_id=q.id),'[]') answers
+  FROM knowledge_questions q JOIN users u ON u.id=q.user_id
+  WHERE ($1::text IS NULL OR q.status=$1)
+  AND ($2::text IS NULL OR concat_ws(' ',q.topic,q.question,u.first_name,u.family_name,u.email) ILIKE $2)
+  ORDER BY q.created_at DESC LIMIT 500`,[status,search?`%${search}%`:null]);
+ res.json({questions:result.rows});
+}));
+router.patch("/knowledge/questions/:id/status",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
+ const status=text(req.body.status,"Status",{required:true,max:40}).toLowerCase();
+ if(!['submitted','reviewing','answered','closed'].includes(status))return res.status(400).json({message:"Invalid question status."});
+ const result=await pool.query("UPDATE knowledge_questions SET status=$1,updated_at=now() WHERE id=$2 RETURNING *",[status,uuid(req.params.id,"Question ID")]);
+ if(!result.rows[0])return res.status(404).json({message:"Question not found."});
+ res.json({question:result.rows[0]});
+}));
+router.get("/contact-messages",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
+ const status=text(req.query.status,"Status",{max:30})?.toUpperCase()||null;
+ const search=text(req.query.search,"Search",{max:200});
+ const result=await pool.query(`SELECT id,full_name,email,subject,message,status,resolved_at,created_at
+  FROM contact_messages WHERE ($1::text IS NULL OR status=$1)
+  AND ($2::text IS NULL OR concat_ws(' ',full_name,email,subject,message) ILIKE $2)
+  ORDER BY created_at DESC LIMIT 500`,[status,search?`%${search}%`:null]);
+ res.json({messages:result.rows});
+}));
+router.patch("/contact-messages/:id/status",requireRole("ADMIN"),asyncRoute(async(req,res)=>{
+ const status=text(req.body.status,"Status",{required:true,max:30}).toUpperCase();
+ if(!['NEW','IN_PROGRESS','RESOLVED','CLOSED'].includes(status))return res.status(400).json({message:"Invalid message status."});
+ const result=await pool.query(`UPDATE contact_messages SET status=$1,
+  resolved_at=CASE WHEN $1 IN('RESOLVED','CLOSED') THEN COALESCE(resolved_at,now()) ELSE NULL END
+  WHERE id=$2 RETURNING id,full_name,email,subject,message,status,resolved_at,created_at`,[status,uuid(req.params.id,"Message ID")]);
+ if(!result.rows[0])return res.status(404).json({message:"Message not found."});
+ res.json({message:result.rows[0]});
+}));
 router.post("/knowledge/questions/:id/answers",asyncRoute(async(req,res)=>{const client=await pool.connect();try{await client.query("BEGIN");const r=await client.query("INSERT INTO knowledge_answers(question_id,answered_by,answer,is_published) VALUES($1,$2,$3,$4) RETURNING *",[uuid(req.params.id),req.user.id,text(req.body.answer,"Answer",{required:true,max:10000}),req.body.isPublished!==false]);await client.query("UPDATE knowledge_questions SET status='answered',updated_at=now() WHERE id=$1",[req.params.id]);await client.query("COMMIT");res.status(201).json({answer:r.rows[0]});}catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}}));
 router.post("/knowledge/questions/:id/recipes",asyncRoute(async(req,res)=>{
  const question=await pool.query("SELECT user_id FROM knowledge_questions WHERE id=$1",[uuid(req.params.id)]);
@@ -238,6 +275,9 @@ router.get("/workshops/requests",requireRole("ADMIN"),asyncRoute(async(req,res)=
 }));
 router.get("/customers", requireRole("ADMIN"), asyncRoute(async (req, res) => {
   const search = text(req.query.search, "Search", { max: 200 });
+  const customerType = text(req.query.type, "Customer type", { max: 40 })?.toUpperCase() || "ALL";
+  const allowedCustomerTypes = ["ALL", "INDIVIDUAL", "COMPANY", "WELLNESS", "WORKSHOP", "ORDERS", "QUESTIONS", "INACTIVE"];
+  if (!allowedCustomerTypes.includes(customerType)) return res.status(400).json({ message: "Invalid customer type." });
   const isExport = req.query.export === "true";
 
   const result = await pool.query(`
@@ -268,7 +308,15 @@ router.get("/customers", requireRole("ADMIN"), asyncRoute(async (req, res) => {
 
       (SELECT COUNT(*)
        FROM wellness_review_cases wc
-       WHERE wc.user_id = u.id) AS wellness_case_count
+       WHERE wc.user_id = u.id) AS wellness_case_count,
+
+      (SELECT COUNT(*)
+       FROM workshop_bookings wb
+       WHERE wb.user_id = u.id) AS workshop_booking_count,
+
+      (SELECT COUNT(*)
+       FROM knowledge_questions kq
+       WHERE kq.user_id = u.id) AS knowledge_question_count
 
     FROM users u
 
@@ -285,10 +333,20 @@ AND (
     u.business_id
   ) ILIKE $1
 )
+AND (
+  $2 = 'ALL'
+  OR ($2 = 'INDIVIDUAL' AND u.account_type = 'INDIVIDUAL')
+  OR ($2 = 'COMPANY' AND u.account_type = 'COMPANY')
+  OR ($2 = 'WELLNESS' AND EXISTS (SELECT 1 FROM wellness_review_cases wc WHERE wc.user_id = u.id))
+  OR ($2 = 'WORKSHOP' AND (EXISTS (SELECT 1 FROM workshop_requests wr WHERE wr.user_id = u.id) OR EXISTS (SELECT 1 FROM workshop_bookings wb WHERE wb.user_id = u.id)))
+  OR ($2 = 'ORDERS' AND EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id))
+  OR ($2 = 'QUESTIONS' AND EXISTS (SELECT 1 FROM knowledge_questions kq WHERE kq.user_id = u.id))
+  OR ($2 = 'INACTIVE' AND u.is_active = false)
+)
 
     ORDER BY u.created_at DESC
     LIMIT ${isExport ? 5000 : 500}
-  `, [search ? `%${search}%` : null]);
+  `, [search ? `%${search}%` : null, customerType]);
   if (isExport) {
   const rows = result.rows;
 
@@ -310,7 +368,9 @@ AND (
     "Registered",
     "Orders",
     "Workshop Requests",
-    "Wellness Cases"
+    "Wellness Cases",
+    "Workshop Bookings",
+    "Knowledge Questions"
   ];
 
   const csv = [
@@ -328,7 +388,9 @@ AND (
       customer.created_at,
       customer.order_count,
       customer.workshop_request_count,
-      customer.wellness_case_count
+      customer.wellness_case_count,
+      customer.workshop_booking_count,
+      customer.knowledge_question_count
     ].map(csvEscape).join(","))
   ].join("\n");
 
@@ -338,6 +400,36 @@ AND (
 }
 
   res.json({ customers: result.rows });
+}));
+router.get("/customers/:id", requireRole("ADMIN"), asyncRoute(async (req, res) => {
+  const customerId = uuid(req.params.id, "Customer ID");
+  const customerResult = await pool.query(`SELECT id,email,first_name,family_name,phone,address,date_of_birth,
+    preferred_language,account_type,company_name,business_id,is_active,created_at,updated_at
+    FROM users WHERE id=$1 AND role='CUSTOMER'`, [customerId]);
+  if (!customerResult.rows[0]) return res.status(404).json({ message: "Customer not found." });
+
+  const [family, wishes, wellness, questions, requests, bookings, orders] = await Promise.all([
+    pool.query("SELECT * FROM family_members WHERE user_id=$1 ORDER BY created_at DESC", [customerId]),
+    pool.query("SELECT * FROM happy_wishes WHERE user_id=$1 ORDER BY created_at DESC", [customerId]),
+    pool.query(`SELECT id,reference,profile_snapshot,status,reviewer_message,recipe_title,recipe_instructions,
+      recipe_ingredients,safety_notes,price,currency,payment_status,pickup_location,pickup_date,pickup_time,
+      submitted_at,reviewed_at,paid_at,ready_at,completed_at,updated_at
+      FROM wellness_review_cases WHERE user_id=$1 ORDER BY created_at DESC`, [customerId]),
+    pool.query(`SELECT q.*,COALESCE((SELECT json_agg(a ORDER BY a.created_at) FROM knowledge_answers a WHERE a.question_id=q.id),'[]') answers
+      FROM knowledge_questions q WHERE q.user_id=$1 ORDER BY q.created_at DESC`, [customerId]),
+    pool.query(`SELECT wr.*,w.title workshop_title,w.theme FROM workshop_requests wr
+      LEFT JOIN workshops w ON w.id=wr.workshop_id WHERE wr.user_id=$1 ORDER BY wr.created_at DESC`, [customerId]),
+    pool.query(`SELECT wb.*,w.title workshop_title,ws.starts_at,ws.ends_at,ws.location
+      FROM workshop_bookings wb JOIN workshop_sessions ws ON ws.id=wb.session_id
+      JOIN workshops w ON w.id=ws.workshop_id WHERE wb.user_id=$1 ORDER BY wb.created_at DESC`, [customerId]),
+    pool.query(`SELECT o.*,COALESCE((SELECT json_agg(oi ORDER BY oi.id) FROM order_items oi WHERE oi.order_id=o.id),'[]') items,
+      COALESCE((SELECT json_agg(p ORDER BY p.created_at DESC) FROM payments p WHERE p.order_id=o.id),'[]') payments
+      FROM orders o WHERE o.user_id=$1 ORDER BY o.created_at DESC`, [customerId]),
+  ]);
+
+  res.json({ customer: customerResult.rows[0], familyMembers: family.rows, happyWishes: wishes.rows,
+    wellnessCases: wellness.rows, knowledgeQuestions: questions.rows, workshopRequests: requests.rows,
+    workshopBookings: bookings.rows, orders: orders.rows });
 }));
 router.patch("/customers/:id/status", requireRole("ADMIN"), asyncRoute(async (req, res) => {
   const customerId = uuid(req.params.id, "Customer ID");
