@@ -122,6 +122,22 @@ try {
     headers: { ...auth, "Idempotency-Key": `smoke-${marker}` },
     body: JSON.stringify({ email, paymentMethod: "card", billingAddress: { fullName: "Smoke Test" }, items: [{ productId: product.id, quantity: 1 }] }),
   });
+  if (created.order.fulfilment_method !== "DELIVERY" || Number(created.order.shipping_amount) !== 5.9 || Number(created.order.total) !== Number(created.order.subtotal) + 5.9) {
+    throw new Error("Default delivery order totals or fulfilment method are incorrect.");
+  }
+  const pickup = await request("/api/orders", {
+    method: "POST",
+    headers: { ...auth, "Idempotency-Key": `smoke-pickup-${marker}` },
+    body: JSON.stringify({ email, paymentMethod: "card", deliveryMethod: "PICKUP", billingAddress: { fullName: "Smoke Test" }, shippingAddress: null, items: [{ productId: product.id, quantity: 1 }] }),
+  });
+  if (pickup.order.fulfilment_method !== "PICKUP" || pickup.order.shipping_address !== null || Number(pickup.order.shipping_amount) !== 0 || Number(pickup.order.total) !== Number(pickup.order.subtotal)) {
+    throw new Error("Pickup order totals, address, or fulfilment method are incorrect.");
+  }
+  const persistedOrders = await pool.query("SELECT fulfilment_method,shipping_amount,subtotal,total,shipping_address FROM orders WHERE id=ANY($1::uuid[])", [[created.order.id, pickup.order.id]]);
+  const persistedDelivery = persistedOrders.rows.find((order) => order.fulfilment_method === "DELIVERY");
+  const persistedPickup = persistedOrders.rows.find((order) => order.fulfilment_method === "PICKUP");
+  if (!persistedDelivery || Number(persistedDelivery.shipping_amount) !== 5.9 || Number(persistedDelivery.total) !== Number(persistedDelivery.subtotal) + 5.9) throw new Error("Delivery order database values are incorrect.");
+  if (!persistedPickup || persistedPickup.shipping_address !== null || Number(persistedPickup.shipping_amount) !== 0 || Number(persistedPickup.total) !== Number(persistedPickup.subtotal)) throw new Error("Pickup order database values are incorrect.");
   await request(`/api/orders/track/${created.order.order_number}?email=${encodeURIComponent(email)}`);
   const reset = await request("/api/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) });
   if (reset.resetToken) await request("/api/auth/reset-password", { method: "POST", body: JSON.stringify({ token: reset.resetToken, password: "SmokeTest!567" }) });
@@ -140,7 +156,7 @@ try {
     await client.query("DELETE FROM supplier_applications WHERE email=$1", [supplierEmail]);
     await client.query("DELETE FROM workshop_requests WHERE email=$1", [email]);
     await client.query("DELETE FROM users WHERE email=$1", [email]);
-    await client.query("DELETE FROM idempotency_keys WHERE key=$1", [`smoke-${marker}`]);
+    await client.query("DELETE FROM idempotency_keys WHERE key=ANY($1::text[])", [[`smoke-${marker}`, `smoke-pickup-${marker}`]]);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
